@@ -1,0 +1,3 @@
+label,nb_flux_attaque,flux_detectes,taux_detection_pct
+PORTSCAN,158930,158553,99.76
+DDOS,128027,128024,100.0

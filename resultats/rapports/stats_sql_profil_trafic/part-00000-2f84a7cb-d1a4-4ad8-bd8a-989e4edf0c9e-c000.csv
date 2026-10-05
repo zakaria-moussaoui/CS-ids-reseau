@@ -1,0 +1,4 @@
+label,nb_flux,duree_moyenne_ms,paquets_moyens,octets_moyens,syn_moyen,paquets_retour_moyens
+NORMAL,225212,13425.29,12.55,6437.49,0.06,6.5
+PORTSCAN,158930,82.82,2.02,13.33,0.0,1.0
+DDOS,128027,16955.59,7.73,7405.54,0.0,3.26

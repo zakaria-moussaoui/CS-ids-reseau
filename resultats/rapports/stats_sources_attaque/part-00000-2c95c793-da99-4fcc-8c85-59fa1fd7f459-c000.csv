@@ -1,0 +1,3 @@
+ip_src,ip_src_type,nb_flux_attaque,nb_cibles,nb_ports_touches,types_attaque
+172.16.0.1,privée,286954,1,1000,"DDOS, PORTSCAN"
+192.168.10.50,privée,3,1,3,DDOS

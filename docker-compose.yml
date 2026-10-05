@@ -1,0 +1,188 @@
+name: ids-reseau
+
+# Pipeline IDS : flux réseau CIC-IDS2017 -> sonde (producer) -> Kafka -> Spark Streaming
+#                (nettoyage + détection d'intrusions) -> MongoDB + Parquet -> Mini-SOC
+#
+# Lancement :   ./lanceApp.sh            (ou : docker compose up -d --build)
+# Mini-SOC  :   http://localhost:8501
+# Analyse   :   docker compose stop spark-streaming kafka   puis   docker compose run --rm spark-analytics
+
+services:
+
+  # ---------- 1. Kafka (mode KRaft, sans Zookeeper) ----------
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: ids-kafka
+    hostname: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - ids
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  # Crée le topic "flux-reseau" puis s'arrête
+  kafka-init:
+    image: apache/kafka:3.9.1
+    container_name: ids-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists --topic flux-reseau --partitions 3 --replication-factor 1
+        && echo "Topic 'flux-reseau' prêt"
+    networks:
+      - ids
+    restart: "no"
+
+  # ---------- 2. MongoDB ----------
+  mongodb:
+    image: mongo:latest
+    container_name: ids-mongodb
+    hostname: mongodb
+    # Cache limité à 512 Mo pour laisser de la mémoire à Spark sur un PC modeste
+    command: ["--wiredTigerCacheSizeGB", "0.5"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - ids
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  # ---------- 3. Sonde réseau = Producer Kafka (image personnalisée) ----------
+  producer:
+    build: ./App/producer
+    image: ids-reseau/producer
+    container_name: ids-producer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: flux-reseau
+      # Fichiers à rejouer, séparés par des virgules, DANS L'ORDRE CHRONOLOGIQUE
+      # Fichiers à rejouer, dans l'ordre chronologique (lanceApp.sh test -> échantillon)
+      FICHIERS: ${FICHIERS:-/data/Friday-*PortScan*.csv,/data/Friday-*DDos*.csv}
+      VITESSE: "1000"     # flux envoyés par seconde
+      LIMITE: "0"         # 0 = tout envoyer
+    volumes:
+      - ./Dataset:/data
+      - ./App/producer:/app
+    networks:
+      - ids
+    restart: "no"
+
+  # ---------- 4. Spark Structured Streaming : nettoyage + IDS (image personnalisée) ----------
+  spark-streaming:
+    build: ./App/spark
+    image: ids-reseau/spark
+    container_name: ids-spark-streaming
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: flux-reseau
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: ids_reseau
+      DOSSIER_SORTIE: /resultats
+      DOSSIER_CHECKPOINT: /resultats/checkpoints
+      SPARK_DRIVER_MEMORY: 2g
+      MAX_FLUX_PAR_BATCH: "20000"   # flux lus dans Kafka par micro-batch
+      TZ: UTC
+      # Règles de détection (fenêtre de 1 minute sur l'heure réelle des flux)
+      FENETRE: "1 minute"
+      WATERMARK: "1 hour"
+      SEUIL_SCAN: "100"         # ports différents d'une même cible
+      SEUIL_FLOOD: "1000"       # flux vers une même cible
+      SEUIL_BRUTEFORCE: "30"    # connexions SSH/FTP
+      VERSION_REGLES: "v2"      # v1 = règles naïves, v2 = règles ajustées (moins de fausses alertes)
+      LISTE_BLANCHE: "192.168.10.3"   # serveurs d'infrastructure (DNS / contrôleur de domaine)
+    command: ["python", "-u", "/app/streaming_job.py"]
+    ports:
+      - "4040:4040"
+    volumes:
+      - ./Dataset:/data
+      - ./resultats:/resultats
+      - ./App/spark:/app
+    networks:
+      - ids
+    restart: on-failure:5   # redémarre en cas de plantage et reprend au checkpoint
+
+  # ---------- 5. Mini-SOC : tableau de bord temps réel (image personnalisée) ----------
+  dashboard:
+    build: ./App/dashboard
+    image: ids-reseau/dashboard
+    container_name: ids-dashboard
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: ids_reseau
+      TZ: UTC
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./App/dashboard/app.py:/app/app.py
+    networks:
+      - ids
+
+  # ---------- 6. Analyse batch + évaluation du détecteur (à la demande) ----------
+  spark-analytics:
+    image: ids-reseau/spark
+    profiles: ["analyse"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: ids_reseau
+      DOSSIER_SORTIE: /resultats
+      SPARK_DRIVER_MEMORY: 2g
+      TZ: UTC
+    command: ["python", "-u", "/app/analytics_job.py"]
+    volumes:
+      - ./Dataset:/data
+      - ./resultats:/resultats
+      - ./App/spark:/app
+    networks:
+      - ids
+
+volumes:
+  kafka_data:
+  mongo_data:
+
+networks:
+  ids:
+    driver: bridge

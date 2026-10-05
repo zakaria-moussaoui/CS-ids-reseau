@@ -1,0 +1,4 @@
+protocole_nom,nb_flux,nb_flux_attaque,part_attaque_pct
+TCP,419034,286950,68.48
+UDP,92980,1,0.0
+HOPOPT,155,6,3.87

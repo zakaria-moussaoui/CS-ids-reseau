@@ -1,0 +1,8 @@
+version,type,nb_alertes,vraies_alertes,fausses_alertes,precision_pct
+v1,BRUTE FORCE SSH/FTP,3,3,0,100.0
+v1,FLOOD / DDOS,51,31,20,60.78
+v2,FLOOD / DDOS,25,25,0,100.0
+v1,SCAN DE PORTS,11,11,0,100.0
+v2,SCAN DE PORTS,11,11,0,100.0
+v1,TOTAL,65,45,20,69.23
+v2,TOTAL,36,36,0,100.0

@@ -1,0 +1,5 @@
+data/output/
+data/checkpoints/
+data/*.csv
+!data/echantillon_reseau_test.csv
+__pycache__/
